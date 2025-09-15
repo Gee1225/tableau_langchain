@@ -53,22 +53,39 @@ def get_headlessbi_data(payload, url: str, api_key: str, datasource_luid: str):
 
 
 
-def get_payload(output):
-    try:
-        parsed_output = output.split('JSON_payload')[1]
-    except IndexError:
-        raise ValueError("'JSON_payload' not found in the output")
+def get_payload(output: str):
+    """
+    Extract a JSON object from the model output.
+    Accepts:
+      - ```json ... ``` fenced code blocks
+      - Plain JSON in the text
+      - The older "JSON_payload: { ... }" pattern
+    """
+    s = (output or "").strip()
 
-    match = re.search(r'{.*}', parsed_output, re.DOTALL)
-    if match:
-        json_string = match.group(0)
-        try:
-            payload = json.loads(json_string)
-            return payload
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON format in the payload")
-    else:
-        raise ValueError("No JSON payload found in the parsed output")
+    # Prefer a ```json fenced block
+    m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", s, re.IGNORECASE)
+    if not m:
+        # Any fenced block
+        m = re.search(r"```\s*(\{[\s\S]*?\})\s*```", s)
+
+    # Plain JSON anywhere in the string
+    if not m:
+        m = re.search(r"(\{[\s\S]*\})", s)
+
+    # Legacy: split on "JSON_payload" if present, then look again
+    if not m and "JSON_payload" in s:
+        _, tail = s.split("JSON_payload", 1)
+        m = re.search(r"(\{[\s\S]*\})", tail)
+
+    if not m:
+        raise ValueError("No JSON payload found in the model output")
+
+    try:
+        return json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON format in the payload: {e}")
+
 
 
 def get_values(api_key: str, url: str, datasource_luid: str, caption: str):
@@ -147,12 +164,19 @@ def augment_datasource_metadata(
         datasource_luid=datasource_luid
     )
 
-    for field in datasource_metadata['data']:
-        del field['fieldName']
-        del field['logicalTableId']
+    # Normalize fields: keep logicalTableId, ensure it's always present
+    normalized = []
+    for field in datasource_metadata.get('data', []):
+        f = dict(field)  # shallow copy
+        f.pop('fieldName', None)            # OK to drop fieldName from the prompt
+        f.setdefault('logicalTableId', None)  # <-- critical: avoid KeyError downstream
+        normalized.append(f)
 
     # insert the data model with sample values from Tableau's VDS metadata API
-    prompt['data_model'] = datasource_metadata['data']
+    prompt['data_model'] = normalized
+
+    # insert the data model with sample values from Tableau's VDS metadata API
+    # prompt['data_model'] = datasource_metadata['data']
 
     # include previous error and query to debug in current run
     if previous_errors:
